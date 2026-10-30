@@ -1,0 +1,101 @@
+name: Build Mobile NixOS (POCO X3 Pro / vayu)
+
+on:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: "Image variant"
+        type: choice
+        options: [phosh, minimal]
+        default: phosh
+      mobile_nixos_rev:
+        description: "mobile-nixos revision/branch (empty = pinned in mobile-nixos.rev)"
+        type: string
+        default: ""
+      runner:
+        description: "Runner (arm = native & fast, public repos; x86 = cross-compile, very slow)"
+        type: choice
+        options: [ubuntu-24.04-arm, ubuntu-24.04]
+        default: ubuntu-24.04-arm
+      release:
+        description: "Publish as GitHub release"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ inputs.variant }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: vayu-${{ inputs.variant }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache \
+                      /usr/local/share/boost /usr/local/.ghcup /usr/share/swift || true
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          df -h /
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            max-jobs = auto
+            cores = 0
+
+      - name: Install zstd
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq zstd
+
+      - name: Build image
+        env:
+          VARIANT: ${{ inputs.variant }}
+          MN_REV_INPUT: ${{ inputs.mobile_nixos_rev }}
+        run: |
+          args=(-v "$VARIANT" -o "$GITHUB_WORKSPACE/out")
+          [ -n "$MN_REV_INPUT" ] && args+=(-r "$MN_REV_INPUT")
+          ./build.sh "${args[@]}"
+          pkg="$(ls -d out/nixos-vayu-* | head -1)"
+          echo "PKG=$pkg" >> "$GITHUB_ENV"
+          echo "PKG_NAME=$(basename "$pkg")" >> "$GITHUB_ENV"
+
+      - name: Summary
+        run: |
+          {
+            echo "## $PKG_NAME"
+            echo '```'
+            cat "$PKG/build-info.txt"
+            echo '```'
+            echo '| File | Size |'
+            echo '|---|---|'
+            for f in "$PKG"/*; do echo "| $(basename "$f") | $(du -h "$f" | cut -f1) |"; done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PKG_NAME }}
+          path: ${{ env.PKG }}/*
+          compression-level: 0
+          retention-days: 14
+
+      - name: Create release
+        if: ${{ inputs.release }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.PKG_NAME }}
+          name: "Mobile NixOS vayu — ${{ inputs.variant }} (${{ github.run_number }})"
+          prerelease: true
+          body_path: ${{ env.PKG }}/build-info.txt
+          files: ${{ env.PKG }}/*
