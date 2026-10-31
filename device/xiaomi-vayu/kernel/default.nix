@@ -13,8 +13,6 @@ let
 in
 mobile-nixos.kernel-builder {
   version = "6.4.0";
-  # CONFIG_LOCALVERSION="-sm8150" in config.aarch64
-  modDirVersion = "6.4.0-sm8150";
   configfile = ./config.aarch64;
 
   src = fetchurl {
